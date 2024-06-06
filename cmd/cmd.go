@@ -11,6 +11,7 @@ import (
 	"github.com/mattn/go-runewidth"
 	"golang.org/x/term"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"os"
@@ -73,13 +74,21 @@ func displayResponse(content string, state *displayResponseState) {
 	}
 }
 
+type ModelMessages struct {
+	model1Messages []internal.Message
+	model2Messages []internal.Message
+}
+
 func Generate(ctx context.Context, model config.Config) error {
-	messages := make([]internal.Message, 0)
+	messages := ModelMessages{
+		model1Messages: make([]internal.Message, 0),
+		model2Messages: make([]internal.Message, 0),
+	}
 
 	scanner, err := readline.New(readline.Prompt{
 		Prompt:         ">>> ",
 		AltPrompt:      "... ",
-		Placeholder:    "Send a message (/? for help)",
+		Placeholder:    "Message",
 		AltPlaceholder: `Use """ to end multi-line input`,
 	})
 	if err != nil {
@@ -90,9 +99,11 @@ func Generate(ctx context.Context, model config.Config) error {
 	defer fmt.Printf(readline.EndBracketedPaste)
 
 	var sb strings.Builder
+	lastModelIndex := 0 // to track the last model used
 
 	for {
 		line, err := scanner.Readline()
+
 		switch {
 		case errors.Is(err, io.EOF):
 			fmt.Println()
@@ -110,23 +121,96 @@ func Generate(ctx context.Context, model config.Config) error {
 			return err
 		case strings.HasPrefix(line, "/exit"), strings.HasPrefix(line, "/bye"):
 			return nil
+		case strings.HasPrefix(line, "/continue"):
+			currentMessages := messages.model1Messages
+			if lastModelIndex == 1 {
+				currentMessages = messages.model2Messages
+			}
+
+			assistant, err := chat(ctx, currentMessages, model[lastModelIndex].Name)
+			if err != nil {
+				return err
+			}
+
+			if assistant != nil {
+				if lastModelIndex == 0 {
+					messages.model1Messages = append(messages.model1Messages, *assistant)
+					invertedAssistant := *assistant
+					if assistant.Role == "assistant" {
+						invertedAssistant.Role = "user"
+					} else if assistant.Role == "user" {
+						invertedAssistant.Role = "assistant"
+					}
+					messages.model2Messages = append(messages.model2Messages, invertedAssistant)
+				} else {
+					messages.model2Messages = append(messages.model2Messages, *assistant)
+					invertedAssistant := *assistant
+					if assistant.Role == "assistant" {
+						invertedAssistant.Role = "user"
+					} else if assistant.Role == "user" {
+						invertedAssistant.Role = "assistant"
+					}
+					messages.model1Messages = append(messages.model1Messages, invertedAssistant)
+				}
+				lastModelIndex = (lastModelIndex + 1) % len(model) // toggle between models
+			}
+			continue
 		default:
 			sb.WriteString(line)
 		}
 
 		if sb.Len() > 0 {
-			newMessage := internal.Message{Role: "user", Content: sb.String()}
-
-			messages = append(messages, newMessage)
-
-			assistant, err := chat(ctx, messages, model[0].Name)
+			role, err := getRole(scanner)
 			if err != nil {
 				return err
 			}
-			if assistant != nil {
-				messages = append(messages, *assistant)
-			}
 
+			newMessage := internal.Message{Role: role, Content: sb.String()}
+
+			messages.model1Messages = append(messages.model1Messages, newMessage)
+			messages.model2Messages = append(messages.model2Messages, newMessage)
+
+			switch role {
+			case "user", "system":
+				currentMessages := messages.model1Messages
+				if lastModelIndex == 1 {
+					currentMessages = messages.model2Messages
+				}
+
+				assistant, err := chat(ctx, currentMessages, model[lastModelIndex].Name)
+				if err != nil {
+					return err
+				}
+
+				if assistant != nil {
+					if lastModelIndex == 0 {
+						messages.model1Messages = append(messages.model1Messages, *assistant)
+						invertedAssistant := *assistant
+						if assistant.Role == "assistant" {
+							invertedAssistant.Role = "user"
+						} else if assistant.Role == "user" {
+							invertedAssistant.Role = "assistant"
+						}
+						messages.model2Messages = append(messages.model2Messages, invertedAssistant)
+					} else {
+						messages.model2Messages = append(messages.model2Messages, *assistant)
+						invertedAssistant := *assistant
+						if assistant.Role == "assistant" {
+							invertedAssistant.Role = "user"
+						} else if assistant.Role == "user" {
+							invertedAssistant.Role = "assistant"
+						}
+						messages.model1Messages = append(messages.model1Messages, invertedAssistant)
+					}
+					lastModelIndex = (lastModelIndex + 1) % len(model) // toggle between models
+				}
+			case "assistant":
+				fmt.Println("Continuing as assistant...")
+
+				messages.model1Messages = append(messages.model1Messages, newMessage)
+				messages.model2Messages = append(messages.model2Messages, newMessage)
+				continue
+			}
 			sb.Reset()
 		}
 	}
@@ -134,6 +218,7 @@ func Generate(ctx context.Context, model config.Config) error {
 }
 
 func chat(ctx context.Context, messages []internal.Message, model string) (*internal.Message, error) {
+	log.Printf("Current model %v\n", model)
 	client := internal.NewClient(
 		&url.URL{
 			Scheme: "http",

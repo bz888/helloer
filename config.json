@@ -1,10 +1,10 @@
 [
   {
-    "name": "he",
+    "name": "mario:latest",
     "description": "he is  a person"
   },
   {
-    "name": "her",
+    "name": "llama3:latest",
     "description": "she is a person"
   }
 ]
