@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"encoding/csv"
 	"errors"
 	"fmt"
 	"github.com/bz888/helloer/internal"
@@ -18,11 +19,39 @@ import (
 	"os/signal"
 	"strings"
 	"syscall"
+	"time"
 )
 
 type displayResponseState struct {
 	lineLength int
 	wordBuffer string
+}
+
+func saveMessagesToCSV(filepath string, messages []internal.Message) error {
+	p := progress.NewProgress(os.Stderr)
+	defer p.StopAndClear()
+
+	spinner := progress.NewSpinner("")
+	p.Add("", spinner)
+
+	file, err := os.Create(filepath)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	writer := csv.NewWriter(file)
+	defer writer.Flush()
+
+	// Write header
+	writer.Write([]string{"Timestamp", "Role", "Message"})
+
+	// Write messages
+	for _, message := range messages {
+		writer.Write([]string{time.Now().Format(time.RFC3339), message.Role, message.Content})
+	}
+
+	return nil
 }
 
 func displayResponse(content string, state *displayResponseState) {
@@ -155,6 +184,38 @@ func Generate(ctx context.Context, model config.Config) error {
 				lastModelIndex = (lastModelIndex + 1) % len(model) // toggle between models
 			}
 			continue
+		case strings.HasPrefix(line, "/save"):
+			if config.SavePath != "" {
+				model1Filepath := fmt.Sprintf("%s_model1.csv", config.SavePath)
+				model2Filepath := fmt.Sprintf("%s_model2.csv", config.SavePath)
+				err := saveMessagesToCSV(model1Filepath, messages.model1Messages)
+				if err != nil {
+					return err
+				}
+				err = saveMessagesToCSV(model2Filepath, messages.model2Messages)
+				if err != nil {
+					return err
+				}
+			} else {
+				sb.Reset()
+				fmt.Print("Enter save location: ")
+				saveLocation, err := scanner.Readline()
+				if err != nil {
+					return err
+				}
+				saveLocation = strings.TrimSpace(saveLocation)
+				model1Filepath := fmt.Sprintf("helloer_%s_model1.csv", saveLocation)
+				model2Filepath := fmt.Sprintf("helloer_%s_model2.csv", saveLocation)
+				err = saveMessagesToCSV(model1Filepath, messages.model1Messages)
+				if err != nil {
+					return err
+				}
+				err = saveMessagesToCSV(model2Filepath, messages.model2Messages)
+				if err != nil {
+					return err
+				}
+				continue
+			}
 		default:
 			sb.WriteString(line)
 		}
@@ -167,10 +228,14 @@ func Generate(ctx context.Context, model config.Config) error {
 
 			newMessage := internal.Message{Role: role, Content: sb.String()}
 
-			messages.model1Messages = append(messages.model1Messages, newMessage)
-			messages.model2Messages = append(messages.model2Messages, newMessage)
+			if lastModelIndex == 0 {
+				messages.model1Messages = append(messages.model1Messages, newMessage)
+			} else {
+				messages.model2Messages = append(messages.model2Messages, newMessage)
+			}
 
 			switch role {
+			// system role will overwrite the model's system message
 			case "user", "system":
 				currentMessages := messages.model1Messages
 				if lastModelIndex == 1 {

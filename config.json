@@ -1,10 +1,10 @@
 [
   {
-    "name": "mario:latest",
+    "name": "dreamer:latest",
     "description": "he is  a person"
   },
   {
-    "name": "llama3:latest",
+    "name": "nastenka:latest",
     "description": "she is a person"
   }
 ]
